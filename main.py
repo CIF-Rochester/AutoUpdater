@@ -31,16 +31,20 @@ def makeLogger(logFile):
     logger.addHandler(fh)
     return logger
 
-def update_libraries(client: paramiko.SSHClient, password, command: str):
+def update_libraries(client: paramiko.SSHClient, password, commands: list[str]):
     try:
-        stdin, stdout, stderr = client.exec_command(command, get_pty=True)
-        stdin.write(f'{password}\n')
-        channel = stdout.channel
-        while not channel.exit_status_ready():
-            pass
-        if stderr.read():
-            return "Error running library update command"
-        return "Libraries updated"
+        output = ''
+        for command in commands:
+            stdin, stdout, stderr = client.exec_command(command, get_pty=True)
+            stdin.write(f'{password}\n')
+            channel = stdout.channel
+            while not channel.exit_status_ready():
+                pass
+            if stderr.read():
+                output = "Error running library update command"
+        if len(output) == 0:
+            return "Libraries updated"
+        return output
     except Exception as e:
         return "Unable to run library update command"
 
