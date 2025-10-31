@@ -17,11 +17,12 @@ class Server:
     username: str
     password: str
     os: str
+    extra_commands: list
 
 @dataclass
 class ServerConfig:
     nauticock: Nauticock
-    servers: list[Server]
+    servers: list
 
 def load_config(config_path: os.PathLike):
     try:
@@ -37,7 +38,11 @@ def load_config(config_path: os.PathLike):
         for section in cfg.sections():
             if section == 'nauticock':
                 continue
-            server = Server(name=section, ip=cfg.get(section, 'ip'), username=cfg.get(section, 'username'), password=cfg.get(section, 'password'), os=cfg.get(section, 'os'))
+            if cfg.has_option(section, 'extra_commands'):
+                extra_commands = cfg.get(section, 'extra_commands').split(',')
+            else:
+                extra_commands = []
+            server = Server(name=section, ip=cfg.get(section, 'ip'), username=cfg.get(section, 'username'), password=cfg.get(section, 'password'), os=cfg.get(section, 'os'), extra_commands=extra_commands)
             servers.append(server)
         config = ServerConfig(nauticock=nauticock, servers=servers)
     except Exception as e:

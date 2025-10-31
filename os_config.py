@@ -6,7 +6,7 @@ from dataclasses import dataclass
 @dataclass
 class OS:
     name: str
-    lib_update: list[str]
+    lib_update: list
     distro_check: str
     distro_check_neg: str
     distro_check_pos: str

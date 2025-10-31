@@ -11,6 +11,12 @@ import server_config
 import schedule
 import time
 import datetime
+import signal
+
+def handler(signum, frame):
+  pass
+
+signal.signal(signal.SIGALRM, handler)
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +26,8 @@ DEFAULT_OS_CFG_PATH = os.path.join(SCRIPT_PATH, "os_config.cfg")
 DEFAULT_LOG_PATH = os.path.join(SCRIPT_PATH, "update.log")
 server_cfg = server_config.load_config(DEFAULT_SERVER_CFG_PATH)
 os_cfg = os_config.load_config(DEFAULT_OS_CFG_PATH)
+
+TIME_LIMIT = 5 * 60
 
 def makeLogger(logFile):
     formatter = logging.Formatter(fmt='[%(asctime)s] %(levelname)-8s %(message)s',
@@ -31,42 +39,74 @@ def makeLogger(logFile):
     logger.addHandler(fh)
     return logger
 
-def update_libraries(client: paramiko.SSHClient, password, commands: list[str]):
+def update_libraries(client: paramiko.SSHClient, password, commands: list):
     try:
-        output = ''
-        for command in commands:
-            stdin, stdout, stderr = client.exec_command(command, get_pty=True)
-            stdin.write(f'{password}\n')
-            channel = stdout.channel
-            while not channel.exit_status_ready():
-                pass
-            if stderr.read():
-                output = "Error running library update command"
-        if len(output) == 0:
-            return "Libraries updated"
-        return output
-    except Exception as e:
-        return "Unable to run library update command"
+        signal.alarm(TIME_LIMIT)
+        try:
+            output = ''
+            for command in commands:
+                stdin, stdout, stderr = client.exec_command(command, get_pty=True)
+                stdin.write(f'{password}\n')
+                channel = stdout.channel
+                while not channel.exit_status_ready():
+                    pass
+                if stderr.read():
+                    output = "Error running library update command"
+            if len(output) == 0:
+                return "Libraries updated"
+            return output
+        except Exception as e:
+            return "Unable to run library update command"
+    finally:
+        signal.alarm(0)
+        return "Library update command timed out"
 
 def check_distro(client: paramiko.SSHClient, password: str, command: str, pos: str, neg: str):
     try:
-        stdin, stdout, stderr = client.exec_command(command, get_pty=True)
-        stdin.write(password + '\n')
-        if stderr.read():
-            return "Error running distro check command"
-        output = stdout.read().decode("utf-8")
-        if pos in output:
-            lines = output.split('\n')
-            for line in lines:
-                if pos in line:
-                    return line
-            return "Unable to determine if new distro is available"
-        elif neg in output:
-            return "Distro is up-to-date"
-        else:
-            "Unable to determine if new distro is available"
-    except Exception as e:
-        return "Unable to run distro check command"
+        signal.alarm(TIME_LIMIT)
+        try:
+            stdin, stdout, stderr = client.exec_command(command, get_pty=True)
+            stdin.write(password + '\n')
+            if stderr.read():
+                return "Error running distro check command"
+            output = stdout.read().decode("utf-8")
+            if pos in output:
+                lines = output.split('\n')
+                for line in lines:
+                    if pos in line:
+                        return line
+                return "Unable to determine if new distro is available"
+            elif neg in output:
+                return "Distro is up-to-date"
+            else:
+                "Unable to determine if new distro is available"
+        except Exception as e:
+            return "Unable to run distro check command"
+    finally:
+        signal.alarm(0)
+        return "Distro check command timed out"
+
+def run_extra_commands(client: paramiko.SSHClient, password, commands: list):
+    try:
+        signal.alarm(TIME_LIMIT)
+        try:
+            output = ''
+            for command in commands:
+                stdin, stdout, stderr = client.exec_command(command, get_pty=True)
+                stdin.write(f'{password}\n')
+                channel = stdout.channel
+                while not channel.exit_status_ready():
+                    pass
+                if stderr.read():
+                    output = "Error running extra command"
+            if len(output) == 0:
+                return "Ran all extra commands"
+            return output
+        except Exception as e:
+            return "Unable to run extra commands"
+    finally:
+        signal.alarm(0)
+        return "Extra commands timed out"
 
 def update_server(server: server_config.Server, os: os_config.OS):
     ip = server.ip
@@ -78,7 +118,10 @@ def update_server(server: server_config.Server, os: os_config.OS):
         return f'Unable to SSH into {ip}'
     update_output = f'{server.name}\n'
     update_output += f'  - {update_libraries(client, server.password, os.lib_update)}\n'
-    update_output += f'  - {check_distro(client, server.password, os.distro_check, os.distro_check_pos, os.distro_check_neg)}\n'
+    if len(os.distro_check) > 0:
+        update_output += f'  - {check_distro(client, server.password, os.distro_check, os.distro_check_pos, os.distro_check_neg)}\n'
+    if len(server.extra_commands):
+        update_output += f'  - {run_extra_commands(client, server.password, server.extra_commands)}\n'
     try:
         client.close()
     except Exception as e:
