@@ -3,29 +3,20 @@ import time
 import paramiko
 import logging
 import os
-
-import select
-
-import os_config
-import server_config
-import schedule
-import time
-import datetime
+import config
 import signal
+import subprocess
+import sys
+from datetime import datetime
 
-def handler(signum, frame):
-  pass
-
-signal.signal(signal.SIGALRM, handler)
+from config import Network
 
 logger = logging.getLogger(__name__)
 
 SCRIPT_PATH = os.path.abspath(os.path.dirname(__file__))
-DEFAULT_SERVER_CFG_PATH = os.path.join(SCRIPT_PATH, "server_config.cfg")
-DEFAULT_OS_CFG_PATH = os.path.join(SCRIPT_PATH, "os_config.cfg")
+DEFAULT_CFG_PATH = os.path.join(SCRIPT_PATH, "config.cfg")
 DEFAULT_LOG_PATH = os.path.join(SCRIPT_PATH, "update.log")
-server_cfg = server_config.load_config(DEFAULT_SERVER_CFG_PATH)
-os_cfg = os_config.load_config(DEFAULT_OS_CFG_PATH)
+config = config.load_config(DEFAULT_CFG_PATH)
 
 TIME_LIMIT = 5 * 60
 
@@ -34,127 +25,66 @@ def makeLogger(logFile):
                                   datefmt='%Y-%m-%d %H:%M:%S')
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.DEBUG)
+    stdout_handler = logging.StreamHandler(sys.stdout)
     fh = logging.FileHandler(logFile)
     fh.setFormatter(formatter)
     logger.addHandler(fh)
+    logger.addHandler(stdout_handler)
     return logger
 
-def update_libraries(client: paramiko.SSHClient, password, commands: list):
+def update_libraries(client: paramiko.SSHClient, password):
     try:
-        signal.alarm(TIME_LIMIT)
-        try:
-            output = ''
+        os = client.exec_command(". /etc/os-release && echo $NAME")[1].read().decode('utf-8').strip()
+        logger.info(f"Found OS \"{os}\"")
+        if os in config.os_dict:
+            commands = config.os_dict[os]
             for command in commands:
-                stdin, stdout, stderr = client.exec_command(command, get_pty=True)
-                stdin.write(f'{password}\n')
+                start_time = datetime.now()
+                stdin, stdout, stderr = client.exec_command(f"echo \"{password}\" | {command}")
                 channel = stdout.channel
                 while not channel.exit_status_ready():
-                    pass
-                if stderr.read():
-                    output = "Error running library update command"
-            if len(output) == 0:
-                return "Libraries updated"
-            return output
-        except Exception as e:
-            return "Unable to run library update command"
-    finally:
-        signal.alarm(0)
-        return "Library update command timed out"
-
-def check_distro(client: paramiko.SSHClient, password: str, command: str, pos: str, neg: str):
-    try:
-        signal.alarm(TIME_LIMIT)
-        try:
-            stdin, stdout, stderr = client.exec_command(command, get_pty=True)
-            stdin.write(password + '\n')
-            if stderr.read():
-                return "Error running distro check command"
-            output = stdout.read().decode("utf-8")
-            if pos in output:
-                lines = output.split('\n')
-                for line in lines:
-                    if pos in line:
-                        return line
-                return "Unable to determine if new distro is available"
-            elif neg in output:
-                return "Distro is up-to-date"
-            else:
-                "Unable to determine if new distro is available"
-        except Exception as e:
-            return "Unable to run distro check command"
-    finally:
-        signal.alarm(0)
-        return "Distro check command timed out"
-
-def run_extra_commands(client: paramiko.SSHClient, password, commands: list):
-    try:
-        signal.alarm(TIME_LIMIT)
-        try:
-            output = ''
-            for command in commands:
-                stdin, stdout, stderr = client.exec_command(command, get_pty=True)
-                stdin.write(f'{password}\n')
-                channel = stdout.channel
-                while not channel.exit_status_ready():
-                    pass
-                if stderr.read():
-                    output = "Error running extra command"
-            if len(output) == 0:
-                return "Ran all extra commands"
-            return output
-        except Exception as e:
-            return "Unable to run extra commands"
-    finally:
-        signal.alarm(0)
-        return "Extra commands timed out"
-
-def update_server(server: server_config.Server, os: os_config.OS):
-    ip = server.ip
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        client.connect(ip, username=server.username,password=server.password)
+                    if (datetime.now() - start_time).total_seconds() >= TIME_LIMIT:
+                        return "Timed out"
+                err = stderr.read().decode('utf-8')
+            return "Libraries updated"
+        else:
+            logger.warning(f"OS \"{os}\" not in config")
+            return "OS not in config"
     except Exception as e:
-        return f'Unable to SSH into {ip}'
-    update_output = f'{server.name}\n'
-    update_output += f'  - {update_libraries(client, server.password, os.lib_update)}\n'
-    if len(os.distro_check) > 0:
-        update_output += f'  - {check_distro(client, server.password, os.distro_check, os.distro_check_pos, os.distro_check_neg)}\n'
-    if len(server.extra_commands):
-        update_output += f'  - {run_extra_commands(client, server.password, server.extra_commands)}\n'
-    try:
-        client.close()
-    except Exception as e:
-        pass
-    logger.info(f"{ip} updated")
-    return update_output
+        logger.error(e)
+        return "Unable to update"
 
-def notify_discord(update_info):
-    try:
+def update_network(network: Network):
+    output = f"[{'.'.join([ str(n) for n in network.network])}/{network.netmask_num}]\n"
+    num_servers = 1 << (32 - network.netmask_num)
+    netmask = network.netmask
+    for i in range(1, num_servers):
+        ip = network.network
+        ip = [(ip[0] & netmask[0]) + ((i >> 24) & 255), (ip[1] & netmask[1]) + ((i >> 8) & 255), (ip[2] & netmask[2]) + ((i >> 8) & 255), (ip[3] & netmask[3]) + (i & 255)]
+        ip = '.'.join([str(num) for num in ip])
+        if ip in config.ignore:
+            continue
+        logger.info(f"SSHing into {ip}")
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(server_cfg.nauticock.ip, username=server_cfg.nauticock.username, password=server_cfg.nauticock.password, timeout=30)
-        client.exec_command(server_cfg.nauticock.command + f" --text \"AutoUpdater updated the following servers:\" --mono \"{update_info}\"")
-        client.close()
-        logger.info("Report to sent to Discord")
-    except Exception as e:
-        logger.error("Unable to connect to notify NauticockBot")
+        try:
+            client.connect(ip, username=config.auth.username, password=config.auth.password, timeout=2)
+            result = update_libraries(client, config.auth.password)
+            logger.info(result)
+            output += f"  {ip}: {result}\n"
+        except Exception as e:
+            continue
+    return output
 
-def update_all_servers():
-    logger.info(f"Server updates started at {datetime.datetime.now()}")
-    update_info = ''
-    for server in server_cfg.servers:
-        update_info += update_server(server, os_cfg.os_dict[server.os])
-    notify_discord(update_info)
-    logger.info(f"Server updates finished at {datetime.datetime.now()}")
+def notify_discord(output):
+    subprocess.run(f"{config.nauticock.command} --text \"\" --mono \"{output}\"", shell=True)
+
+def update_networks():
+    for network in config.networks:
+        output = update_network(network)
+        output += "\n"
+        notify_discord(output)
 
 if __name__ == '__main__':
     logger = makeLogger(DEFAULT_LOG_PATH)
-    # update_all_servers()
-    try:
-        schedule.every().friday.at("03:00").do(update_all_servers)
-        while True:
-            schedule.run_pending()
-            time.sleep(60)
-    except Exception as e:
-        logger.error("A fatal error has occurred")
+    update_networks()
